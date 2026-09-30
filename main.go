@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"log"
 	"os"
-
+	"database/sql"
 	"gator/internal/config"
+	"github.com/lib/pq"
+	"your_module/internal/config"   // adjust to your module path
+	"your_module/internal/database"
 )
 
 // state holds application state, including a pointer to the config.
 type state struct {
+	db  *database.Queries
 	cfg *config.Config
 }
 
@@ -22,6 +26,34 @@ type command struct {
 // commands holds registered CLI handlers mapped by command name.
 type commands struct {
 	handlers map[string]func(*state, command) error
+}
+
+func handlerRegister(s *state, cmd command) error {
+	if len(cmd.Args) == 0 {
+		return fmt.Errorf("usage: %s <name>", cmd.Name)
+	}
+
+	name := cmd.Args[0]
+
+	user, err := s.db.CreateUser(context.Background(), database.CreateUserParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Name:      name,
+	})
+	if err != nil {
+		fmt.Printf("user %s already exists or creation failed: %v\n", name, err)
+		os.Exit(1)
+	}
+
+	err = s.cfg.SetUser(user.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't set current user: %w", err)
+	}
+
+	fmt.Printf("User %s was created successfully!\n", user.Name)
+	fmt.Printf("User Details: ID=%s, CreatedAt=%s\n", user.ID, user.CreatedAt)
+	return nil
 }
 
 // register adds a new command handler to the map.
@@ -41,16 +73,23 @@ func (c *commands) run(s *state, cmd command) error {
 // handlerLogin sets the current user in the config file.
 func handlerLogin(s *state, cmd command) error {
 	if len(cmd.Args) == 0 {
-		return fmt.Errorf("the login handler expects a single argument: <username>")
+		return fmt.Errorf("usage: %s <name>", cmd.Name)
 	}
 
-	username := cmd.Args[0]
-	err := s.cfg.SetUser(username)
+	name := cmd.Args[0]
+
+	_, err := s.db.GetUser(context.Background(), name)
 	if err != nil {
-		return fmt.Errorf("could not set user: %w", err)
+		fmt.Printf("user %s does not exist\n", name)
+		os.Exit(1)
 	}
 
-	fmt.Printf("User has been set to: %s\n", username)
+	err = s.cfg.SetUser(name)
+	if err != nil {
+		return fmt.Errorf("couldn't set current user: %w", err)
+	}
+
+	fmt.Printf("User set to: %s\n", name)
 	return nil
 }
 
@@ -60,8 +99,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("error reading config: %v", err)
 	}
+	db, err := sql.Open("postgres", cfg.DBURL)
+	if err != nil {
+		log.Fatalf("error connecting to database: %v", err)
+	}
+	defer db.Close()
 
-	appState := &state{
+	dbQueries := database.New(db)
+
+	programState := &state{
+		db:  dbQueries,
 		cfg: &cfg,
 	}
 
