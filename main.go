@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
-	"database/sql"
+	"time"
+
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
+
 	"gator/internal/config"
-	"github.com/lib/pq"
-	"your_module/internal/config"   // adjust to your module path
-	"your_module/internal/database"
+	"gator/internal/database"
 )
 
 // state holds application state, including a pointer to the config.
@@ -70,6 +74,17 @@ func (c *commands) run(s *state, cmd command) error {
 	return handler(s, cmd)
 }
 
+func handlerReset(s *state, cmd command) error {
+	err := s.db.DeleteUsers(context.Background())
+	if err != nil {
+		fmt.Printf("failed to reset database: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Database reset successfully! All users deleted.")
+	return nil
+}
+
 // handlerLogin sets the current user in the config file.
 func handlerLogin(s *state, cmd command) error {
 	if len(cmd.Args) == 0 {
@@ -117,6 +132,8 @@ func main() {
 		handlers: make(map[string]func(*state, command) error),
 	}
 	cmds.register("login", handlerLogin)
+	cmds.register("register", handlerRegister)
+	cmds.register("reset", handlerReset)
 
 	// 3. Parse command-line arguments
 	args := os.Args
@@ -134,7 +151,7 @@ func main() {
 	}
 
 	// 4. Run command
-	err = cmds.run(appState, cmd)
+	err = cmds.run(programState, cmd)
 	if err != nil {
 		fmt.Println("Error:", err)
 		os.Exit(1)
