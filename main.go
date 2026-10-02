@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/xml"
 	"fmt"
+	"html"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -14,6 +18,68 @@ import (
 	"gator/internal/config"
 	"gator/internal/database"
 )
+
+type RSSFeed struct {
+	Channel struct {
+		Title       string    `xml:"title"`
+		Link        string    `xml:"link"`
+		Description string    `xml:"description"`
+		Item        []RSSItem `xml:"item"`
+	} `xml:"channel"`
+}
+
+type RSSItem struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
+}
+
+func fetchFeed(ctx context.Context, feedURL string) (*RSSFeed, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", feedURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not create request: %w", err)
+	}
+
+	req.Header.Set("User-Agent", "gator")
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("could not execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("received non-2xx status code: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("could not read response body: %w", err)
+	}
+
+	var feed RSSFeed
+	err = xml.Unmarshal(data, &feed)
+	if err != nil {
+		return nil, fmt.Errorf("could not unmarshal XML: %w", err)
+	}
+
+	// Unescape HTML entities in Channel title and description
+	feed.Channel.Title = html.UnescapeString(feed.Channel.Title)
+	feed.Channel.Description = html.UnescapeString(feed.Channel.Description)
+
+	// Unescape HTML entities in Items
+	for i := range feed.Channel.Item {
+		feed.Channel.Item[i].Title = html.UnescapeString(feed.Channel.Item[i].Title)
+		feed.Channel.Item[i].Description = html.UnescapeString(feed.Channel.Item[i].Description)
+	}
+
+	return &feed, nil
+}
 
 // state holds application state, including a pointer to the config.
 type state struct {
@@ -30,6 +96,17 @@ type command struct {
 // commands holds registered CLI handlers mapped by command name.
 type commands struct {
 	handlers map[string]func(*state, command) error
+}
+
+func handlerReset(s *state, cmd command) error {
+	err := s.db.DeleteUsers(context.Background())
+	if err != nil {
+		fmt.Printf("failed to reset database: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Database reset successfully! All users deleted.")
+	return nil
 }
 
 func handlerRegister(s *state, cmd command) error {
@@ -60,6 +137,18 @@ func handlerRegister(s *state, cmd command) error {
 	return nil
 }
 
+func handlerAgg(s *state, cmd command) error {
+	feedURL := "https://www.wagslane.dev/index.xml"
+
+	feed, err := fetchFeed(context.Background(), feedURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch feed: %w", err)
+	}
+
+	fmt.Printf("%+v\n", feed)
+	return nil
+}
+
 // register adds a new command handler to the map.
 func (c *commands) register(name string, f func(*state, command) error) {
 	c.handlers[name] = f
@@ -72,17 +161,6 @@ func (c *commands) run(s *state, cmd command) error {
 		return fmt.Errorf("unknown command: %s", cmd.Name)
 	}
 	return handler(s, cmd)
-}
-
-func handlerReset(s *state, cmd command) error {
-	err := s.db.DeleteUsers(context.Background())
-	if err != nil {
-		fmt.Printf("failed to reset database: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Database reset successfully! All users deleted.")
-	return nil
 }
 
 // handlerLogin sets the current user in the config file.
@@ -127,6 +205,42 @@ func handlerUsers(s *state, cmd command) error {
 	return nil
 }
 
+func handlerAddFeed(s *state, cmd command) error {
+	if len(cmd.Args) < 2 {
+		return fmt.Errorf("usage: %s <name> <url>", cmd.Name)
+	}
+
+	name := cmd.Args[0]
+	url := cmd.Args[1]
+
+	currentUser, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
+	if err != nil {
+		return fmt.Errorf("couldn't get current user: %w", err)
+	}
+
+	feed, err := s.db.CreateFeed(context.Background(), database.CreateFeedParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Name:      name,
+		Url:       url,
+		UserID:    currentUser.ID,
+	})
+	if err != nil {
+		return fmt.Errorf("couldn't create feed: %w", err)
+	}
+
+	fmt.Println("Feed created successfully!")
+	fmt.Printf("* ID:         %s\n", feed.ID)
+	fmt.Printf("* CreatedAt:  %s\n", feed.CreatedAt)
+	fmt.Printf("* UpdatedAt:  %s\n", feed.UpdatedAt)
+	fmt.Printf("* Name:       %s\n", feed.Name)
+	fmt.Printf("* URL:        %s\n", feed.Url)
+	fmt.Printf("* UserID:     %s\n", feed.UserID)
+
+	return nil
+}
+
 func main() {
 	// 1. Read config and store in state
 	cfg, err := config.Read()
@@ -154,6 +268,8 @@ func main() {
 	cmds.register("register", handlerRegister)
 	cmds.register("reset", handlerReset)
 	cmds.register("users", handlerUsers)
+	cmds.register("agg", handlerAgg)
+	cmds.register("addfeed", handlerAddFeed)
 
 	// 3. Parse command-line arguments
 	args := os.Args
