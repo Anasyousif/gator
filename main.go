@@ -109,6 +109,28 @@ func handlerReset(s *state, cmd command) error {
 	return nil
 }
 
+func handlerFeeds(s *state, cmd command) error {
+	feeds, err := s.db.GetFeeds(context.Background())
+	if err != nil {
+		return fmt.Errorf("couldn't get feeds: %w", err)
+	}
+
+	if len(feeds) == 0 {
+		fmt.Println("No feeds found.")
+		return nil
+	}
+
+	for _, feed := range feeds {
+		fmt.Printf("* Name: %s\n", feed.Name)
+		fmt.Printf("  URL:  %s\n", feed.Url)
+		fmt.Printf("  User: %s\n", feed.UserName)
+	}
+
+	return nil
+}
+
+
+
 func handlerRegister(s *state, cmd command) error {
 	if len(cmd.Args) == 0 {
 		return fmt.Errorf("usage: %s <name>", cmd.Name)
@@ -270,6 +292,7 @@ func main() {
 	cmds.register("users", handlerUsers)
 	cmds.register("agg", handlerAgg)
 	cmds.register("addfeed", handlerAddFeed)
+	cmds.register("feeds", handlerFeeds)
 
 	// 3. Parse command-line arguments
 	args := os.Args
