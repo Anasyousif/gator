@@ -129,8 +129,6 @@ func handlerFeeds(s *state, cmd command) error {
 	return nil
 }
 
-
-
 func handlerRegister(s *state, cmd command) error {
 	if len(cmd.Args) == 0 {
 		return fmt.Errorf("usage: %s <name>", cmd.Name)
@@ -227,13 +225,8 @@ func handlerUsers(s *state, cmd command) error {
 	return nil
 }
 
-func handlerFollowing(s *state, cmd command) error {
-	currentUser, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
-	if err != nil {
-		return fmt.Errorf("couldn't get current user: %w", err)
-	}
-
-	feedFollows, err := s.db.GetFeedFollowsForUser(context.Background(), currentUser.ID)
+func handlerFollowing(s *state, cmd command, user database.User) error {
+	feedFollows, err := s.db.GetFeedFollowsForUser(context.Background(), user.ID)
 	if err != nil {
 		return fmt.Errorf("couldn't get feed follows: %w", err)
 	}
@@ -243,14 +236,15 @@ func handlerFollowing(s *state, cmd command) error {
 		return nil
 	}
 
-	fmt.Printf("Feeds followed by %s:\n", currentUser.Name)
+	fmt.Printf("Feeds followed by %s:\n", user.Name)
 	for _, ff := range feedFollows {
 		fmt.Printf("* %s\n", ff.FeedName)
 	}
 
 	return nil
 }
-func handlerAddFeed(s *state, cmd command) error {
+
+func handlerAddFeed(s *state, cmd command, user database.User) error {
 	if len(cmd.Args) < 2 {
 		return fmt.Errorf("usage: %s <name> <url>", cmd.Name)
 	}
@@ -258,18 +252,13 @@ func handlerAddFeed(s *state, cmd command) error {
 	name := cmd.Args[0]
 	url := cmd.Args[1]
 
-	currentUser, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
-	if err != nil {
-		return fmt.Errorf("couldn't get current user: %w", err)
-	}
-
 	feed, err := s.db.CreateFeed(context.Background(), database.CreateFeedParams{
 		ID:        uuid.New(),
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 		Name:      name,
 		Url:       url,
-		UserID:    currentUser.ID,
+		UserID:    user.ID,
 	})
 	if err != nil {
 		return fmt.Errorf("couldn't create feed: %w", err)
@@ -279,7 +268,7 @@ func handlerAddFeed(s *state, cmd command) error {
 		ID:        uuid.New(),
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
-		UserID:    currentUser.ID,
+		UserID:    user.ID,
 		FeedID:    feed.ID,
 	})
 	if err != nil {
@@ -298,17 +287,12 @@ func handlerAddFeed(s *state, cmd command) error {
 	return nil
 }
 
-func handlerFollow(s *state, cmd command) error {
+func handlerFollow(s *state, cmd command, user database.User) error {
 	if len(cmd.Args) < 1 {
 		return fmt.Errorf("usage: %s <url>", cmd.Name)
 	}
 
 	url := cmd.Args[0]
-
-	currentUser, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
-	if err != nil {
-		return fmt.Errorf("couldn't get current user: %w", err)
-	}
 
 	feed, err := s.db.GetFeedByURL(context.Background(), url)
 	if err != nil {
@@ -319,7 +303,7 @@ func handlerFollow(s *state, cmd command) error {
 		ID:        uuid.New(),
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
-		UserID:    currentUser.ID,
+		UserID:    user.ID,
 		FeedID:    feed.ID,
 	})
 	if err != nil {
@@ -330,40 +314,14 @@ func handlerFollow(s *state, cmd command) error {
 	return nil
 }
 
-func handlerAddFeed(s *state, cmd command) error {
-	if len(cmd.Args) < 2 {
-		return fmt.Errorf("usage: %s <name> <url>", cmd.Name)
+func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
+	return func(s *state, cmd command) error {
+		user, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
+		if err != nil {
+			return err
+		}
+		return handler(s, cmd, user)
 	}
-
-	name := cmd.Args[0]
-	url := cmd.Args[1]
-
-	currentUser, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
-	if err != nil {
-		return fmt.Errorf("couldn't get current user: %w", err)
-	}
-
-	feed, err := s.db.CreateFeed(context.Background(), database.CreateFeedParams{
-		ID:        uuid.New(),
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-		Name:      name,
-		Url:       url,
-		UserID:    currentUser.ID,
-	})
-	if err != nil {
-		return fmt.Errorf("couldn't create feed: %w", err)
-	}
-
-	fmt.Println("Feed created successfully!")
-	fmt.Printf("* ID:         %s\n", feed.ID)
-	fmt.Printf("* CreatedAt:  %s\n", feed.CreatedAt)
-	fmt.Printf("* UpdatedAt:  %s\n", feed.UpdatedAt)
-	fmt.Printf("* Name:       %s\n", feed.Name)
-	fmt.Printf("* URL:        %s\n", feed.Url)
-	fmt.Printf("* UserID:     %s\n", feed.UserID)
-
-	return nil
 }
 
 func main() {
@@ -394,10 +352,12 @@ func main() {
 	cmds.register("reset", handlerReset)
 	cmds.register("users", handlerUsers)
 	cmds.register("agg", handlerAgg)
-	cmds.register("addfeed", handlerAddFeed)
 	cmds.register("feeds", handlerFeeds)
-	cmds.register("follow", handlerFollow)       // <-- Add
-	cmds.register("following", handlerFollowing) /
+
+	// Protected handlers wrapped with middlewareLoggedIn
+	cmds.register("addfeed", middlewareLoggedIn(handlerAddFeed))
+	cmds.register("follow", middlewareLoggedIn(handlerFollow))
+	cmds.register("following", middlewareLoggedIn(handlerFollowing))
 
 	// 3. Parse command-line arguments
 	args := os.Args
