@@ -347,6 +347,30 @@ func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) 
 		return handler(s, cmd, user)
 	}
 }
+func scrapeFeeds(s *state) error {
+	feed, err := s.db.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return fmt.Errorf("couldn't get next feed to fetch: %w", err)
+	}
+
+	err = s.db.MarkFeedFetched(context.Background(), feed.ID)
+	if err != nil {
+		return fmt.Errorf("couldn't mark feed %s as fetched: %w", feed.Name, err)
+	}
+
+	rssFeed, err := fetchFeed(context.Background(), feed.Url)
+	if err != nil {
+		return fmt.Errorf("couldn't fetch feed %s: %w", feed.Name, err)
+	}
+
+	fmt.Printf("--- Fetching feed: %s (%s) ---\n", feed.Name, feed.Url)
+	for _, item := range rssFeed.Channel.Item {
+		fmt.Printf("* %s\n", item.Title)
+	}
+	fmt.Println()
+
+	return nil
+}
 
 func main() {
 	// 1. Read config and store in state
