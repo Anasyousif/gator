@@ -182,17 +182,27 @@ func handlerRegister(s *state, cmd command) error {
 }
 
 func handlerAgg(s *state, cmd command) error {
-	feedURL := "https://www.wagslane.dev/index.xml"
-
-	feed, err := fetchFeed(context.Background(), feedURL)
-	if err != nil {
-		return fmt.Errorf("failed to fetch feed: %w", err)
+	if len(cmd.Args) < 1 {
+		return fmt.Errorf("usage: %s <time_between_reqs>", cmd.Name)
 	}
 
-	fmt.Printf("%+v\n", feed)
-	return nil
-}
+	timeBetweenRequests, err := time.ParseDuration(cmd.Args[0])
+	if err != nil {
+		return fmt.Errorf("invalid duration string: %w", err)
+	}
 
+	fmt.Printf("Collecting feeds every %s...\n", timeBetweenRequests)
+
+	ticker := time.NewTicker(timeBetweenRequests)
+	defer ticker.Stop()
+
+	for ; ; <-ticker.C {
+		err := scrapeFeeds(s)
+		if err != nil {
+			fmt.Printf("error fetching feed: %v\n", err)
+		}
+	}
+}
 // register adds a new command handler to the map.
 func (c *commands) register(name string, f func(*state, command) error) {
 	c.handlers[name] = f
