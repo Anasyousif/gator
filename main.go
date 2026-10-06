@@ -381,6 +381,117 @@ func scrapeFeeds(s *state) error {
 
 	return nil
 }
+func parsePubDate(pubDate string) (sql.NullTime, error) {
+	if pubDate == "" {
+		return sql.NullTime{Valid: false}, nil
+	}
+
+	formats := []string{
+		time.RFC1123Z,
+		time.RFC1123,
+		time.RFC822Z,
+		time.RFC822,
+		time.RFC3339,
+	}
+
+	for _, layout := range formats {
+		if t, err := time.Parse(layout, pubDate); err == nil {
+			return sql.NullTime{Time: t, Valid: true}, nil
+		}
+	}
+
+	return sql.NullTime{Valid: false}, fmt.Errorf("could not parse date: %s", pubDate)
+}
+
+func scrapeFeeds(s *state) error {
+	feed, err := s.db.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return fmt.Errorf("couldn't get next feed to fetch: %w", err)
+	}
+
+	err = s.db.MarkFeedFetched(context.Background(), feed.ID)
+	if err != nil {
+		return fmt.Errorf("couldn't mark feed %s as fetched: %w", feed.Name, err)
+	}
+
+	rssFeed, err := fetchFeed(context.Background(), feed.Url)
+	if err != nil {
+		return fmt.Errorf("couldn't fetch feed %s: %w", feed.Name, err)
+	}
+
+	for _, item := range rssFeed.Channel.Item {
+		pubDate, err := parsePubDate(item.PubDate)
+		if err != nil {
+			log.Printf("couldn't parse publish date '%s' for post '%s': %v", item.PubDate, item.Title, err)
+		}
+
+		description := sql.NullString{
+			String: item.Description,
+			Valid:  item.Description != "",
+		}
+
+		_, err = s.db.CreatePost(context.Background(), database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: description,
+			PublishedAt: pubDate,
+			FeedID:      feed.ID,
+		})
+
+		if err != nil {
+			// Ignore duplicate key errors (PostgreSQL error code 23505)
+			if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "23505") {
+				continue
+			}
+			log.Printf("couldn't create post '%s': %v", item.Title, err)
+		}
+	}
+
+	fmt.Printf("Feed '%s' collected, %d posts processed.\n", feed.Name, len(rssFeed.Channel.Item))
+	return nil
+}
+
+func handlerBrowse(s *state, cmd command, user database.User) error {
+	limit := 2
+	if len(cmd.Args) > 0 {
+		parsedLimit, err := strconv.Atoi(cmd.Args[0])
+		if err != nil {
+			return fmt.Errorf("invalid limit: %w", err)
+		}
+		limit = parsedLimit
+	}
+
+	posts, err := s.db.GetPostsForUser(context.Background(), database.GetPostsForUserParams{
+		UserID: user.ID,
+		Limit:  int32(limit),
+	})
+	if err != nil {
+		return fmt.Errorf("couldn't get posts: %w", err)
+	}
+
+	if len(posts) == 0 {
+		fmt.Println("No posts found. Make sure you follow some feeds and that `agg` has fetched posts.")
+		return nil
+	}
+
+	fmt.Printf("Found %d posts for user %s:\n\n", len(posts), user.Name)
+	for _, post := range posts {
+		fmt.Printf("--- %s ---\n", post.Title)
+		fmt.Printf("URL: %s\n", post.Url)
+		if post.PublishedAt.Valid {
+			fmt.Printf("Published: %s\n", post.PublishedAt.Time.Format("Jan 02, 2006"))
+		}
+		if post.Description.Valid && post.Description.String != "" {
+			fmt.Printf("Description: %s\n", post.Description.String)
+		}
+		fmt.Println()
+	}
+
+	return nil
+}
 
 func main() {
 	// 1. Read config and store in state
@@ -417,6 +528,7 @@ func main() {
 	cmds.register("follow", middlewareLoggedIn(handlerFollow))
 	cmds.register("following", middlewareLoggedIn(handlerFollowing))
 	cmds.register("unfollow", middlewareLoggedIn(handlerUnfollow))
+	cmds.register("browse", middlewareLoggedIn(handlerBrowse))
 
 	// 3. Parse command-line arguments
 	args := os.Args
